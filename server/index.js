@@ -1,8 +1,9 @@
 import "dotenv/config";
 import { initializeApp } from "firebase-admin/app";
 import { getAuth } from "firebase-admin/auth";
-import { randomUUID } from "node:crypto";
+import { createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { fileURLToPath } from "node:url";
+import { readFile, writeFile } from "node:fs/promises";
 import cors from "cors";
 import express from "express";
 import rateLimit from "express-rate-limit";
@@ -15,9 +16,15 @@ import { captureOrder, createOrder, HttpError, paypalIsConfigured, validateCompl
 const app = express();
 const port = Number(process.env.PORT || 3001);
 const appBaseUrl = new URL(process.env.APP_BASE_URL || "http://localhost:5173");
-const firebaseAuthDomain = process.env.FIREBASE_AUTH_DOMAIN || `${process.env.FIREBASE_PROJECT_ID}.firebaseapp.com`;
+const firebaseProjectId = process.env.FIREBASE_PROJECT_ID;
+const authMode = firebaseProjectId ? "firebase" : "local-development";
+const firebaseAuthDomain = process.env.FIREBASE_AUTH_DOMAIN ||
+  (firebaseProjectId ? `${firebaseProjectId}.firebaseapp.com` : null);
 if (!["http:", "https:"].includes(appBaseUrl.protocol)) {
   throw new Error("APP_BASE_URL must use HTTP or HTTPS.");
+}
+if (process.env.NODE_ENV === "production" && authMode !== "firebase") {
+  throw new Error("FIREBASE_PROJECT_ID is required in production. Local development sessions are not allowed.");
 }
 const allowedOrigins = new Set(
   (process.env.CORS_ORIGINS || "http://localhost:5173")
@@ -26,14 +33,35 @@ const allowedOrigins = new Set(
     .filter(Boolean)
 );
 
-if (!process.env.FIREBASE_PROJECT_ID) {
-  throw new Error("FIREBASE_PROJECT_ID must be set before starting PayApp.");
-}
 if (!process.env.MONGODB_URI) {
   throw new Error("MONGODB_URI must be set before starting PayApp.");
 }
 
-initializeApp({ projectId: process.env.FIREBASE_PROJECT_ID });
+if (authMode === "firebase") {
+  initializeApp({ projectId: firebaseProjectId });
+}
+async function getLocalSessionSecret() {
+  if (process.env.DEV_AUTH_SECRET) return process.env.DEV_AUTH_SECRET;
+
+  const secretFile = fileURLToPath(new URL("../.payapp-dev-auth-secret", import.meta.url));
+  try {
+    return (await readFile(secretFile, "utf8")).trim();
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+  }
+
+  const generatedSecret = randomBytes(32).toString("hex");
+  try {
+    await writeFile(secretFile, generatedSecret, { encoding: "utf8", flag: "wx", mode: 0o600 });
+    return generatedSecret;
+  } catch (error) {
+    if (error.code !== "EEXIST") throw error;
+    return (await readFile(secretFile, "utf8")).trim();
+  }
+}
+
+const localSessionSecret = authMode === "local-development" ? await getLocalSessionSecret() : null;
+const LOCAL_SESSION_LIFETIME_SECONDS = 30 * 24 * 60 * 60;
 
 app.disable("x-powered-by");
 app.use(
@@ -49,12 +77,16 @@ app.use(
           "'self'",
           "https://api-m.sandbox.paypal.com",
           "https://www.sandbox.paypal.com",
-          `https://${firebaseAuthDomain}`,
+          ...(firebaseAuthDomain ? [`https://${firebaseAuthDomain}`] : []),
           "https://identitytoolkit.googleapis.com",
           "https://securetoken.googleapis.com",
           "https://www.googleapis.com"
         ],
-        frameSrc: ["https://www.sandbox.paypal.com", "https://*.sandbox.paypal.com", `https://${firebaseAuthDomain}`],
+        frameSrc: [
+          "https://www.sandbox.paypal.com",
+          "https://*.sandbox.paypal.com",
+          ...(firebaseAuthDomain ? [`https://${firebaseAuthDomain}`] : [])
+        ],
         objectSrc: ["'none'"],
         baseUri: ["'self'"],
         upgradeInsecureRequests: null
@@ -90,6 +122,12 @@ const accountLimiter = rateLimit({
   standardHeaders: "draft-7",
   legacyHeaders: false
 });
+const devSessionLimiter = rateLimit({
+  windowMs: 60_000,
+  limit: 10,
+  standardHeaders: "draft-7",
+  legacyHeaders: false
+});
 
 const requestSchema = z.object({
   description: z.string().trim().min(1).max(100),
@@ -106,6 +144,38 @@ const orderCaptureSchema = z.object({
 
 function asyncRoute(handler) {
   return (req, res, next) => Promise.resolve(handler(req, res, next)).catch(next);
+}
+
+function signLocalSession(payload) {
+  const encodedPayload = Buffer.from(JSON.stringify(payload)).toString("base64url");
+  const signature = createHmac("sha256", localSessionSecret).update(encodedPayload).digest("base64url");
+  return `${encodedPayload}.${signature}`;
+}
+
+function verifyLocalSession(token) {
+  const [encodedPayload, signature, extra] = token.split(".");
+  if (!encodedPayload || !signature || extra) return null;
+  const expected = createHmac("sha256", localSessionSecret).update(encodedPayload).digest();
+  let provided;
+  try {
+    provided = Buffer.from(signature, "base64url");
+  } catch {
+    return null;
+  }
+  if (provided.length !== expected.length || !timingSafeEqual(provided, expected)) return null;
+
+  try {
+    const payload = JSON.parse(Buffer.from(encodedPayload, "base64url").toString("utf8"));
+    if (
+      payload.iss !== "payapp-local-development" ||
+      typeof payload.uid !== "string" ||
+      !Number.isInteger(payload.exp) ||
+      payload.exp <= Math.floor(Date.now() / 1000)
+    ) return null;
+    return payload;
+  } catch {
+    return null;
+  }
 }
 
 function asPublicRequest(request) {
@@ -128,10 +198,18 @@ function asOwnerRequest(request) {
   };
 }
 
-const requireFirebaseUser = asyncRoute(async (req, _res, next) => {
+const requireSignedInUser = asyncRoute(async (req, _res, next) => {
   const authorization = req.get("authorization");
   if (!authorization?.startsWith("Bearer ")) {
     throw new HttpError(401, "Sign in to view and create your payment requests.");
+  }
+  if (authMode === "local-development") {
+    const session = verifyLocalSession(authorization.slice(7));
+    if (!session) throw new HttpError(401, "Your local development session has expired. Refresh to continue.");
+    req.firebaseUser = { uid: session.uid };
+    req.isLocalDevelopmentUser = true;
+    next();
+    return;
   }
   try {
     req.firebaseUser = await getAuth().verifyIdToken(authorization.slice(7));
@@ -152,8 +230,31 @@ app.get("/api/health", (_req, res) => {
 
 app.get("/api/config", (_req, res) => {
   res.json({
+    authMode,
     paypalSandboxConfigured: paypalIsConfigured(),
     paypalClientId: process.env.PAYPAL_CLIENT_ID || null
+  });
+});
+
+app.post("/api/dev/session", devSessionLimiter, (_req, res, next) => {
+  if (authMode !== "local-development") {
+    next(new HttpError(404, "Local development sessions are disabled when Firebase Authentication is configured."));
+    return;
+  }
+  const uid = `local_${randomUUID()}`;
+  const expiresAt = Date.now() + LOCAL_SESSION_LIFETIME_SECONDS * 1000;
+  const token = signLocalSession({
+    uid,
+    iss: "payapp-local-development",
+    exp: Math.floor(expiresAt / 1000)
+  });
+  res.status(201).json({
+    session: {
+      uid,
+      token,
+      expiresAt,
+      mode: "local-development"
+    }
   });
 });
 
@@ -166,15 +267,15 @@ app.get("/api/requests/:publicId", publicLimiter, asyncRoute(async (req, res) =>
   res.json({ request: asPublicRequest(request), paypalSandboxConfigured: paypalIsConfigured() });
 }));
 
-app.get("/api/me/requests", accountLimiter, requireFirebaseUser, asyncRoute(async (req, res) => {
+app.get("/api/me/requests", accountLimiter, requireSignedInUser, asyncRoute(async (req, res) => {
   const requests = await PaymentRequest.find({ ownerUid: req.firebaseUser.uid })
     .sort({ createdAt: -1 })
     .limit(50)
     .lean();
-  res.json({ requests: requests.map(asOwnerRequest) });
+  res.json({ requests: requests.map(asOwnerRequest), authMode });
 }));
 
-app.post("/api/requests", accountLimiter, requireFirebaseUser, asyncRoute(async (req, res) => {
+app.post("/api/requests", accountLimiter, requireSignedInUser, asyncRoute(async (req, res) => {
   if (!paypalIsConfigured()) throw new HttpError(503, "PayPal Sandbox is not configured yet.");
   const parsed = requestSchema.safeParse(req.body);
   if (!parsed.success) {
@@ -188,7 +289,7 @@ app.post("/api/requests", accountLimiter, requireFirebaseUser, asyncRoute(async 
     amountCents: Math.round(parsed.data.amount * 100),
     currency: "USD"
   });
-  res.status(201).json({ request: asOwnerRequest(request) });
+  res.status(201).json({ request: asOwnerRequest(request), authMode });
 }));
 
 app.post("/api/checkout/orders", checkoutLimiter, asyncRoute(async (req, res) => {

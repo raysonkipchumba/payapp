@@ -3,4 +3,5 @@ dist/
 .env
 .env.*
 !.env.example
+.payapp-dev-auth-secret
 npm-debug.log*

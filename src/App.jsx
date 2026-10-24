@@ -1,14 +1,13 @@
 import { useEffect, useState } from "react";
 import {
   createUserWithEmailAndPassword,
-  onAuthStateChanged,
-  signInWithEmailAndPassword,
-  signOut
+  signInWithEmailAndPassword
 } from "firebase/auth";
 import { Link, Route, Routes, useParams } from "react-router-dom";
 import { PayPalButtons, PayPalScriptProvider } from "@paypal/react-paypal-js";
 import { apiRequest } from "./api.js";
 import { auth, firebaseConfigured } from "./firebase.js";
+import { getSessionToken, signOutSession, subscribeToSession } from "./session.js";
 
 function formatAmount(amount, currency = "USD") {
   return new Intl.NumberFormat("en-US", { style: "currency", currency }).format(Number(amount));
@@ -24,14 +23,15 @@ function FirebaseSetupNotice() {
   );
 }
 
-function Header({ user }) {
+function Header({ user, authMode }) {
   return (
     <nav className="navbar navbar-expand-lg app-navbar">
       <div className="container">
         <Link className="navbar-brand app-brand" to="/">pay<span>app</span></Link>
         <div className="d-flex align-items-center gap-3">
+          {user?.isLocalDevelopment && <span className="sandbox-badge">LOCAL SESSION</span>}
           {user && <span className="signed-in-email d-none d-sm-inline">{user.email}</span>}
-          {user && <button className="btn btn-outline-secondary btn-sm" onClick={() => signOut(auth)}>Sign out</button>}
+          {user && <button className="btn btn-outline-secondary btn-sm" onClick={() => signOutSession(authMode)}>{authMode === "firebase" ? "Sign out" : "New local session"}</button>}
         </div>
       </div>
     </nav>
@@ -96,7 +96,7 @@ function AuthPanel() {
   );
 }
 
-function RequestForm({ onCreated, enabled }) {
+function RequestForm({ onCreated, enabled, user }) {
   const [description, setDescription] = useState("");
   const [amount, setAmount] = useState("");
   const [error, setError] = useState("");
@@ -107,7 +107,7 @@ function RequestForm({ onCreated, enabled }) {
     setError("");
     setBusy(true);
     try {
-      const token = await auth.currentUser.getIdToken();
+      const token = await getSessionToken(user);
       await apiRequest("/api/requests", {
         method: "POST",
         token,
@@ -206,7 +206,7 @@ function Dashboard({ user, paypalConfigured }) {
     if (!user) return;
     setError("");
     try {
-      const token = await user.getIdToken();
+      const token = await getSessionToken(user);
       const result = await apiRequest("/api/me/requests", { token });
       setRequests(result.requests);
     } catch (err) {
@@ -247,7 +247,8 @@ function Dashboard({ user, paypalConfigured }) {
       {!paypalConfigured && <div className="alert alert-warning" role="alert"><strong>PayPal Sandbox is not configured.</strong> Add your Sandbox app client ID and secret to the server's <code>.env</code> file to enable checkout.</div>}
       {notice && <div className="alert alert-info d-flex justify-content-between align-items-start gap-3" role="status"><span>{notice}</span><button type="button" className="btn-close" aria-label="Dismiss" onClick={() => setNotice("")} /></div>}
 
-      <RequestForm onCreated={refresh} enabled={paypalConfigured} />
+      {user?.isLocalDevelopment && <div className="alert alert-info py-2 small" role="status">You’re using a local development session. Your saved requests are scoped to this browser session and are not connected to a Firebase account.</div>}
+      <RequestForm onCreated={refresh} enabled={paypalConfigured} user={user} />
       <section className="card app-card">
         <div className="card-body p-0">
           <div className="list-heading d-flex align-items-center justify-content-between gap-3 px-4 py-3">
@@ -363,34 +364,72 @@ function PaymentPage({ paypalClientId, paypalConfigured }) {
 
 export default function App() {
   const [user, setUser] = useState(null);
-  const [authReady, setAuthReady] = useState(!firebaseConfigured);
+  const [authReady, setAuthReady] = useState(false);
+  const [authMode, setAuthMode] = useState(null);
+  const [authError, setAuthError] = useState("");
   const [paypalConfig, setPaypalConfig] = useState({ loaded: false, configured: false, clientId: null });
-  useEffect(() => {
-    if (!auth) return undefined;
-    return onAuthStateChanged(auth, (currentUser) => {
-      setUser(currentUser);
-      setAuthReady(true);
-    });
-  }, []);
 
   useEffect(() => {
     let cancelled = false;
+    let unsubscribe;
     apiRequest("/api/config")
-      .then((result) => {
-        if (!cancelled) setPaypalConfig({ loaded: true, configured: result.paypalSandboxConfigured, clientId: result.paypalClientId });
+      .then((config) => {
+        if (cancelled) return;
+        setAuthMode(config.authMode);
+        setPaypalConfig({
+          loaded: true,
+          configured: config.paypalSandboxConfigured,
+          clientId: config.paypalClientId
+        });
+
+        if (config.authMode === "firebase" && !firebaseConfigured) {
+          setAuthError("This server uses Firebase Authentication. Add its Firebase web-app settings to .env.local and reload.");
+          setAuthReady(true);
+          return;
+        }
+
+        unsubscribe = subscribeToSession(
+          (currentUser) => {
+            if (!cancelled) {
+              setUser(currentUser);
+              setAuthReady(true);
+            }
+          },
+          (error) => {
+            if (!cancelled) {
+              setAuthError(error.message || "Unable to start a local session. Check that the PayApp server is running.");
+              setAuthReady(true);
+            }
+          },
+          config.authMode === "firebase"
+        );
       })
-      .catch(() => {
-        if (!cancelled) setPaypalConfig({ loaded: true, configured: false, clientId: null });
+      .catch((error) => {
+        if (!cancelled) {
+          setAuthError(error.message || "Cannot connect to the PayApp server.");
+          setAuthReady(true);
+        }
       });
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+      unsubscribe?.();
+    };
   }, []);
 
   return (
     <>
-      <Header user={user} />
+      <Header user={user} authMode={authMode} />
       <Routes>
         <Route path="/pay/:publicId" element={<PaymentPage paypalClientId={paypalConfig.clientId} paypalConfigured={paypalConfig.configured} />} />
-        <Route path="*" element={authReady ? <Dashboard user={user} paypalConfigured={paypalConfig.configured} /> : <main className="container app-main"><div className="card app-card p-5 text-center text-secondary">Checking your sign-in…</div></main>} />
+        <Route path="*" element={
+          !authReady
+            ? <main className="container app-main"><div className="card app-card p-5 text-center text-secondary">Connecting to PayApp…</div></main>
+            : authError
+              ? <main className="container app-main"><div className="alert alert-danger" role="alert">{authError}</div></main>
+              : authMode === "firebase" && !user
+                ? <AuthPanel />
+                : <Dashboard user={user} paypalConfigured={paypalConfig.configured} />
+        } />
       </Routes>
       <footer className="container app-footer">PayApp · PayPal Sandbox integration · No real payments are processed.</footer>
     </>

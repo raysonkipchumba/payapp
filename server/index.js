@@ -276,11 +276,32 @@ app.get("/api/requests/:publicId", publicLimiter, requireDatabase, asyncRoute(as
 }));
 
 app.get("/api/me/requests", accountLimiter, requireSignedInUser, requireDatabase, asyncRoute(async (req, res) => {
-  const requests = await PaymentRequest.find({ ownerUid: req.firebaseUser.uid })
-    .sort({ createdAt: -1 })
-    .limit(50)
-    .lean();
-  res.json({ requests: requests.map(asOwnerRequest), authMode });
+  const [requests, summaryRows] = await Promise.all([
+    PaymentRequest.find({ ownerUid: req.firebaseUser.uid })
+      .sort({ createdAt: -1 })
+      .limit(50)
+      .lean(),
+    PaymentRequest.aggregate([
+      { $match: { ownerUid: req.firebaseUser.uid } },
+      {
+        $group: {
+          _id: null,
+          totalRequests: { $sum: 1 },
+          paidRequests: { $sum: { $cond: [{ $eq: ["$status", "paid"] }, 1, 0] } },
+          pendingRequests: { $sum: { $cond: [{ $eq: ["$status", "pending"] }, 1, 0] } },
+          confirmedCents: {
+            $sum: { $cond: [{ $eq: ["$status", "paid"] }, "$amountCents", 0] }
+          }
+        }
+      },
+      { $project: { _id: 0 } }
+    ])
+  ]);
+  res.json({
+    requests: requests.map(asOwnerRequest),
+    summary: summaryRows[0] || { totalRequests: 0, paidRequests: 0, pendingRequests: 0, confirmedCents: 0 },
+    authMode
+  });
 }));
 
 app.post("/api/requests", accountLimiter, requireSignedInUser, requireDatabase, asyncRoute(async (req, res) => {

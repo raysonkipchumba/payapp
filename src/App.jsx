@@ -3,7 +3,7 @@ import {
   createUserWithEmailAndPassword,
   signInWithEmailAndPassword
 } from "firebase/auth";
-import { Link, Navigate, Route, Routes, useParams } from "react-router-dom";
+import { Link, Navigate, Route, Routes, useParams, useSearchParams } from "react-router-dom";
 import { PayPalButtons, PayPalScriptProvider } from "@paypal/react-paypal-js";
 import { apiRequest } from "./api.js";
 import { auth, firebaseConfigured } from "./firebase.js";
@@ -24,16 +24,39 @@ function FirebaseSetupNotice() {
 }
 
 function Header({ user, authMode }) {
+  const initials = (user?.email || "A")
+    .split("@")[0]
+    .split(/[.\s_-]+/)
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((part) => part[0].toUpperCase())
+    .join("");
+
   return (
     <nav className="navbar navbar-expand-lg app-navbar">
       <div className="container">
         <Link className="navbar-brand app-brand" to="/">pay<span>app</span></Link>
         <div className="d-flex align-items-center gap-3 ms-auto">
-          <Link className="header-home-link d-none d-sm-inline" to="/">Home</Link>
-          <Link className="btn btn-app-outline btn-sm" to="/dashboard">Dashboard</Link>
-          {user?.isLocalDevelopment && <span className="sandbox-badge">LOCAL SESSION</span>}
-          {user && <span className="signed-in-email d-none d-sm-inline">{user.email}</span>}
-          {user && <button className="btn btn-app-outline btn-sm" onClick={() => signOutSession(authMode)}>{authMode === "firebase" ? "Sign out" : "New local session"}</button>}
+          <Link className="btn btn-app-outline btn-sm" to="/dashboard">My PayApp</Link>
+          {user ? (
+            <div className="dropdown">
+              <button
+                className="account-avatar dropdown-toggle"
+                type="button"
+                data-bs-toggle="dropdown"
+                aria-expanded="false"
+                aria-label="Open account menu"
+              >
+                {initials || "A"}
+              </button>
+              <ul className="dropdown-menu dropdown-menu-end account-menu">
+                <li><span className="dropdown-item-text small text-secondary">{user.email}</span></li>
+                {user.isLocalDevelopment && <li><span className="dropdown-item-text"><span className="sandbox-badge">LOCAL SESSION</span></span></li>}
+                <li><hr className="dropdown-divider" /></li>
+                <li><button className="dropdown-item" type="button" onClick={() => signOutSession(authMode)}>{authMode === "firebase" ? "Sign out" : "New local session"}</button></li>
+              </ul>
+            </div>
+          ) : <Link className="btn btn-app-primary btn-sm" to="/dashboard">Sign in</Link>}
         </div>
       </div>
     </nav>
@@ -163,13 +186,14 @@ function RequestForm({ onCreated, enabled, user }) {
   );
 }
 
-function PaymentList({ requests, onCopy }) {
+function PaymentList({ requests, onCopy, onCreate }) {
   if (!requests.length) {
     return (
       <div className="empty-state text-center px-3 py-5">
         <div className="empty-icon mx-auto mb-3" aria-hidden="true">↗</div>
-        <h3 className="h6 fw-bold">No payment requests yet</h3>
-        <p className="text-secondary small mb-0">Create your first link above. It will appear here after it is saved.</p>
+        <h3 className="h6 fw-bold">No activity yet</h3>
+        <p className="text-secondary small mb-3">New payments will appear here.</p>
+        {onCreate && <button className="btn btn-app-outline btn-sm" type="button" onClick={onCreate}>Create a request</button>}
       </div>
     );
   }
@@ -197,20 +221,165 @@ function PaymentList({ requests, onCopy }) {
   );
 }
 
+const dashboardTabs = [
+  { id: "overview", label: "Overview", icon: "⌂" },
+  { id: "balance", label: "Balance", icon: "◉" },
+  { id: "activity", label: "Activity", icon: "↻" },
+  { id: "request", label: "Request", icon: "＋" },
+  { id: "help", label: "Help", icon: "?" }
+];
+
+function DashboardNavigation({ currentTab, onSelect }) {
+  return (
+    <>
+      <nav className="dashboard-tabs" aria-label="Account sections" role="tablist">
+        {dashboardTabs.map((tab, index) => (
+          <button
+            key={tab.id}
+            id={`tab-${tab.id}`}
+            className={`dashboard-tab${currentTab === tab.id ? " active" : ""}`}
+            type="button"
+            role="tab"
+            aria-selected={currentTab === tab.id}
+            aria-controls="dashboard-panel"
+            onKeyDown={(event) => {
+              let nextIndex = index;
+              if (event.key === "ArrowRight") nextIndex = (index + 1) % dashboardTabs.length;
+              else if (event.key === "ArrowLeft") nextIndex = (index - 1 + dashboardTabs.length) % dashboardTabs.length;
+              else if (event.key === "Home") nextIndex = 0;
+              else if (event.key === "End") nextIndex = dashboardTabs.length - 1;
+              else return;
+              event.preventDefault();
+              const nextTab = dashboardTabs[nextIndex];
+              document.getElementById(`tab-${nextTab.id}`)?.focus();
+              onSelect(nextTab.id);
+            }}
+            onClick={() => onSelect(tab.id)}
+          >
+            <span className="tab-icon" aria-hidden="true">{tab.icon}</span>
+            {tab.label}
+          </button>
+        ))}
+      </nav>
+      <nav className="mobile-bottom-nav" aria-label="Account sections">
+        {dashboardTabs.map((tab) => (
+          <button
+            key={tab.id}
+            className={`mobile-tab${currentTab === tab.id ? " active" : ""}`}
+            type="button"
+            aria-current={currentTab === tab.id ? "page" : undefined}
+            onClick={() => onSelect(tab.id)}
+          >
+            <span className="tab-icon" aria-hidden="true">{tab.icon}</span>
+            <span>{tab.label}</span>
+          </button>
+        ))}
+      </nav>
+    </>
+  );
+}
+
+function DashboardOverview({ requests, summary, onSelect, onCopy }) {
+  return (
+    <>
+      <div className="page-heading d-flex flex-wrap justify-content-between align-items-end gap-3">
+        <div>
+          <span className="eyebrow">PAYAPP</span>
+          <h1 className="display-6 fw-bold mt-1 mb-1">Your money, at a glance.</h1>
+        </div>
+        <button className="btn btn-app-primary" type="button" onClick={() => onSelect("request")}>＋ New request</button>
+      </div>
+      <div className="row g-3 mb-4">
+        <div className="col-12 col-md-4">
+          <button className="summary-card w-100 text-start" type="button" onClick={() => onSelect("balance")}>
+            <span className="summary-label">PayApp confirmed</span>
+            <strong>{formatAmount(summary.confirmedCents / 100)}</strong>
+            <span className="summary-detail">Sandbox payments only</span>
+          </button>
+        </div>
+        <div className="col-6 col-md-4">
+          <button className="summary-card w-100 text-start" type="button" onClick={() => onSelect("activity")}>
+            <span className="summary-label">Paid</span>
+            <strong>{summary.paidRequests}</strong>
+            <span className="summary-detail">confirmed requests</span>
+          </button>
+        </div>
+        <div className="col-6 col-md-4">
+          <button className="summary-card w-100 text-start" type="button" onClick={() => onSelect("activity")}>
+            <span className="summary-label">Awaiting payment</span>
+            <strong>{summary.pendingRequests}</strong>
+            <span className="summary-detail">open requests</span>
+          </button>
+        </div>
+      </div>
+      <section className="card app-card">
+        <div className="list-heading d-flex align-items-center justify-content-between gap-3 px-4 py-3">
+          <h2 className="h6 fw-bold mb-0">Recent activity</h2>
+          <button className="btn btn-app-outline btn-sm" type="button" onClick={() => onSelect("activity")}>See all</button>
+        </div>
+        <PaymentList requests={requests.slice(0, 5)} onCopy={onCopy} onCreate={() => onSelect("request")} />
+      </section>
+    </>
+  );
+}
+
+function BalancePanel({ summary, onSelect }) {
+  return (
+    <section className="balance-panel card app-card">
+      <div className="card-body p-4 p-md-5">
+        <span className="eyebrow">BALANCE</span>
+        <h1 className="h3 fw-bold mt-2">PayPal balance</h1>
+        <p className="balance-unavailable">Your PayPal wallet balance isn’t connected to PayApp.</p>
+        <hr className="my-4" />
+        <div className="d-flex flex-wrap align-items-end justify-content-between gap-3">
+          <div>
+            <div className="summary-label">Confirmed through PayApp</div>
+            <div className="confirmed-total">{formatAmount(summary.confirmedCents / 100)}</div>
+            <div className="summary-detail">PayPal Sandbox checkouts · test funds</div>
+          </div>
+          <button className="btn btn-app-outline" type="button" onClick={() => onSelect("activity")}>View activity</button>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function HelpPanel({ onSelect }) {
+  return (
+    <section className="card app-card">
+      <div className="card-body p-4 p-md-5">
+        <span className="eyebrow">HELP</span>
+        <h1 className="h3 fw-bold mt-2">Quick answers</h1>
+        <div className="help-item">
+          <h2>Where’s my balance?</h2>
+          <p>PayApp doesn’t access PayPal wallet balances. This tab shows confirmed PayApp checkouts.</p>
+        </div>
+        <div className="help-item">
+          <h2>Can I send money to another person?</h2>
+          <p>Payment links go to the merchant configured for this app. Person-to-person transfers aren’t connected.</p>
+        </div>
+        <div className="help-item">
+          <h2>Why is checkout in Sandbox?</h2>
+          <p>Sandbox payments are tests. No real funds move.</p>
+        </div>
+        <button className="btn btn-app-primary mt-2" type="button" onClick={() => onSelect("request")}>Create a request</button>
+      </div>
+    </section>
+  );
+}
+
 function LandingPage() {
   return (
     <main className="landing-page">
       <section className="container landing-hero">
         <div className="row align-items-center g-5">
           <div className="col-lg-7">
-            <span className="landing-kicker"><span className="kicker-dot" /> A clearer way to collect</span>
             <h1 className="landing-title">Good things happen<br className="d-none d-md-block" /> when money <span>moves simply.</span></h1>
-            <p className="landing-copy">Make a payment request, share one secure link, and see when the payment is confirmed. No confusing steps. No pretend balance.</p>
+            <p className="landing-copy">Request. Share. Get confirmation.</p>
             <div className="d-flex flex-wrap gap-3 mt-4">
               <Link className="btn btn-app-primary btn-lg" to="/dashboard">Get started <span aria-hidden="true">↗</span></Link>
-              <a className="btn btn-app-outline btn-lg" href="#how-it-works">See how it works</a>
             </div>
-            <p className="landing-footnote">Free to explore · PayPal Sandbox checkout · No real money charged</p>
+            <p className="landing-footnote">Sandbox payments · No real money</p>
           </div>
           <div className="col-lg-5">
             <div className="landing-visual" aria-label="Illustration showing a shareable payment request">
@@ -223,16 +392,16 @@ function LandingPage() {
                   <span className="visual-brand">pay<span>app</span></span>
                   <span className="visual-label">PAYMENT LINK</span>
                 </div>
-                <p className="visual-caption">A better way to ask</p>
-                <h2 className="visual-heading">Clear request.<br />Easy checkout.</h2>
+                <p className="visual-caption">Payment request</p>
+                <h2 className="visual-heading">Clear.<br />Simple.</h2>
                 <div className="visual-divider" />
                 <div className="d-flex align-items-center gap-2">
                   <span className="visual-link-icon" aria-hidden="true">↗</span>
-                  <span className="visual-share-text">One link to send and share</span>
+                  <span className="visual-share-text">One link. Ready to share.</span>
                 </div>
                 <div className="visual-secure" aria-label="PayPal Sandbox checkout">PAYPAL SANDBOX CHECKOUT <span aria-hidden="true">✓</span></div>
               </div>
-              <div className="visual-floating" aria-hidden="true"><span>✓</span> Payment confirmed</div>
+              <div className="visual-floating" aria-hidden="true"><span>↗</span> Ready to share</div>
             </div>
           </div>
         </div>
@@ -241,43 +410,50 @@ function LandingPage() {
       <section className="container landing-how" id="how-it-works">
         <div className="landing-section-heading">
           <span className="landing-kicker">STRAIGHTFORWARD BY DESIGN</span>
-          <h2>From “could you pay me?” to done.</h2>
+          <h2>Three simple steps.</h2>
         </div>
         <div className="row g-3">
           <div className="col-md-4">
             <article className="how-card h-100">
               <span className="how-number">01</span>
               <h3>Make a request</h3>
-              <p>Say what it’s for and set the amount. Your request is saved to your account.</p>
+              <p>Add a note and amount.</p>
             </article>
           </div>
           <div className="col-md-4">
             <article className="how-card h-100">
               <span className="how-number">02</span>
               <h3>Share one simple link</h3>
-              <p>Send the link to your payer. They’ll see the details before they choose to continue.</p>
+              <p>Share your payment link.</p>
             </article>
           </div>
           <div className="col-md-4">
             <article className="how-card h-100">
               <span className="how-number">03</span>
               <h3>Track the confirmation</h3>
-              <p>Your request changes to paid only when PayPal confirms the Sandbox checkout.</p>
+              <p>See confirmation in your activity.</p>
             </article>
           </div>
         </div>
-        <div className="landing-note mt-4"><span aria-hidden="true">✳</span><span><strong>Built for clarity.</strong> Payments are test transactions, not real money. PayApp shows actual saved requests—not a made-up wallet balance.</span></div>
+        <div className="landing-note mt-4"><span aria-hidden="true">✳</span><span>Sandbox only. No real money.</span></div>
       </section>
     </main>
   );
 }
 
 function Dashboard({ user, paypalConfigured }) {
+  const [searchParams, setSearchParams] = useSearchParams();
   const [requests, setRequests] = useState([]);
+  const [summary, setSummary] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
-  const [busy, setBusy] = useState(false);
+  const requestedTab = searchParams.get("tab");
+  const currentTab = dashboardTabs.some((tab) => tab.id === requestedTab) ? requestedTab : "overview";
+
+  function selectTab(tab) {
+    setSearchParams(tab === "overview" ? {} : { tab }, { replace: true });
+  }
 
   async function refresh() {
     if (!user) return;
@@ -286,6 +462,7 @@ function Dashboard({ user, paypalConfigured }) {
       const token = await getSessionToken(user);
       const result = await apiRequest("/api/me/requests", { token });
       setRequests(result.requests);
+      setSummary(result.summary);
     } catch (err) {
       setError(err.message);
     } finally {
@@ -311,36 +488,49 @@ function Dashboard({ user, paypalConfigured }) {
   if (!user) return <AuthPanel />;
 
   return (
-    <main className="container app-main">
-      <div className="dashboard-intro">
-        <Link to="/" className="back-home">← Back to home</Link>
+    <main className="container app-main dashboard-main">
+      <DashboardNavigation currentTab={currentTab} onSelect={selectTab} />
+      {notice && <div className="alert alert-success d-flex justify-content-between align-items-center gap-3 py-2" role="status"><span>{notice}</span><button type="button" className="btn-close" aria-label="Dismiss" onClick={() => setNotice("")} /></div>}
+      {!paypalConfigured && currentTab === "request" && <div className="alert alert-warning py-2 small" role="status">Sandbox checkout isn’t set up yet.</div>}
+      <div
+        className="dashboard-panel"
+        id="dashboard-panel"
+        role="tabpanel"
+        aria-labelledby={`tab-${currentTab}`}
+        aria-busy={loading}
+      >
+        {loading
+          ? <div className="card app-card p-5 text-center text-secondary">Loading…</div>
+          : error
+            ? <div className="card app-card p-4"><h1 className="h5 fw-bold">Couldn’t load your data</h1><p className="text-secondary mb-3">{error}</p><button className="btn btn-app-primary align-self-start" type="button" onClick={() => { setLoading(true); refresh(); }}>Try again</button></div>
+            : !summary
+              ? <div className="card app-card p-5 text-center text-secondary">No account summary available.</div>
+          : currentTab === "overview"
+            ? <DashboardOverview requests={requests} summary={summary} onSelect={selectTab} onCopy={copyLink} />
+            : currentTab === "balance"
+              ? <BalancePanel summary={summary} onSelect={selectTab} />
+              : currentTab === "activity"
+                ? (
+                  <section className="card app-card">
+                    <div className="list-heading d-flex align-items-center justify-content-between gap-3 px-4 py-3">
+                      <div><h1 className="h5 fw-bold mb-1">Activity</h1><p className="text-secondary small mb-0">Latest {requests.length} of {summary.totalRequests}</p></div>
+                      <button className="btn btn-app-outline btn-sm" type="button" onClick={() => { setLoading(true); refresh(); }}>Refresh</button>
+                    </div>
+                    <PaymentList requests={requests} onCopy={copyLink} />
+                  </section>
+                )
+                : currentTab === "request"
+                  ? (
+                    <>
+                      <RequestForm onCreated={refresh} enabled={paypalConfigured} user={user} />
+                      <section className="card app-card">
+                        <div className="list-heading px-4 py-3"><h2 className="h6 fw-bold mb-0">Latest links</h2></div>
+                        <PaymentList requests={requests} onCopy={copyLink} />
+                      </section>
+                    </>
+                  )
+                  : <HelpPanel onSelect={selectTab} />}
       </div>
-      <div className="page-heading d-flex flex-wrap justify-content-between align-items-end gap-3">
-        <div>
-          <span className="eyebrow">YOUR PAYAPP</span>
-          <h1 className="display-6 fw-bold mt-1 mb-1">Payment requests</h1>
-          <p className="text-secondary mb-0">Create a link, get paid through PayPal Sandbox, and track confirmed payments.</p>
-        </div>
-        <div className="record-count"><span className="small text-secondary">Saved requests</span><strong>{requests.length}</strong></div>
-      </div>
-
-      {!paypalConfigured && <div className="alert alert-warning" role="alert"><strong>PayPal Sandbox is not configured.</strong> Add your Sandbox app client ID and secret to the server's <code>.env</code> file to enable checkout.</div>}
-      {notice && <div className="alert alert-info d-flex justify-content-between align-items-start gap-3" role="status"><span>{notice}</span><button type="button" className="btn-close" aria-label="Dismiss" onClick={() => setNotice("")} /></div>}
-
-      {user?.isLocalDevelopment && <div className="alert alert-info py-2 small" role="status">You’re using a local development session. Your saved requests are scoped to this browser session and are not connected to a Firebase account.</div>}
-      <RequestForm onCreated={refresh} enabled={paypalConfigured} user={user} />
-      <section className="card app-card">
-        <div className="card-body p-0">
-          <div className="list-heading d-flex align-items-center justify-content-between gap-3 px-4 py-3">
-            <div><h2 className="h6 fw-bold mb-1">Your requests</h2><p className="text-secondary small mb-0">Only requests belonging to your signed-in account are shown.</p></div>
-            <button className="btn btn-sm btn-outline-secondary" type="button" disabled={busy} onClick={async () => { setBusy(true); await refresh(); setBusy(false); }}>{busy ? "Refreshing…" : "Refresh"}</button>
-          </div>
-          {error && <div className="alert alert-danger mx-4 mt-2" role="alert">{error}</div>}
-          {loading ? <div className="py-5 text-center text-secondary">Loading saved requests…</div> : <PaymentList requests={requests} onCopy={copyLink} />}
-          <div className="list-footer px-4 py-3">Payment records are saved in the app database and marked paid only after PayApp verifies a completed PayPal Sandbox capture.</div>
-        </div>
-      </section>
-      <div className="alert alert-light border mt-4 small text-secondary" role="note"><strong>Sandbox limitation:</strong> These test payments are not real money. Payments go to the PayPal merchant account configured for this app, not directly to another PayPal user. A PayPal account balance or transaction history is not accessed.</div>
     </main>
   );
 }
@@ -513,7 +703,7 @@ export default function App() {
         <Route path="/" element={<LandingPage />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
-      <footer className="container app-footer">PayApp · PayPal Sandbox integration · No real payments are processed.</footer>
+      
     </>
   );
 }

@@ -11,6 +11,7 @@ PayApp is a small payment-request application built with React, Bootstrap 5, Exp
 - The server creates and captures the PayPal order. It marks a request paid only after verifying the Sandbox capture, request ID, currency, and exact amount.
 - Request records are stored in MongoDB and scoped to the signed-in user's Firebase UID or local development session.
 - Repeated checkout requests reuse the stored PayPal order; capture calls use a stable PayPal idempotency key.
+- The dashboard provides Overview, Balance, Activity, Request, and Help sections, with mobile bottom navigation and account controls in the top corner. Dashboard figures are derived from saved requests; PayPal wallet balances are not connected.
 
 ## Important payment limitations
 

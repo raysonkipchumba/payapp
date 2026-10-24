@@ -33,8 +33,8 @@ const allowedOrigins = new Set(
     .filter(Boolean)
 );
 
-if (!process.env.MONGODB_URI) {
-  throw new Error("MONGODB_URI must be set before starting PayApp.");
+if (process.env.NODE_ENV === "production" && !process.env.MONGODB_URI) {
+  throw new Error("MONGODB_URI is required in production.");
 }
 
 if (authMode === "firebase") {
@@ -144,6 +144,14 @@ const orderCaptureSchema = z.object({
 
 function asyncRoute(handler) {
   return (req, res, next) => Promise.resolve(handler(req, res, next)).catch(next);
+}
+
+function requireDatabase(req, _res, next) {
+  if (mongoose.connection.readyState !== 1) {
+    next(new HttpError(503, "PayApp's database is not connected. Start MongoDB, then retry."));
+    return;
+  }
+  next();
 }
 
 function signLocalSession(payload) {
@@ -258,7 +266,7 @@ app.post("/api/dev/session", devSessionLimiter, (_req, res, next) => {
   });
 });
 
-app.get("/api/requests/:publicId", publicLimiter, asyncRoute(async (req, res) => {
+app.get("/api/requests/:publicId", publicLimiter, requireDatabase, asyncRoute(async (req, res) => {
   const parsedId = publicIdSchema.safeParse(req.params.publicId);
   if (!parsedId.success) throw new HttpError(404, "This payment request could not be found.");
 
@@ -267,7 +275,7 @@ app.get("/api/requests/:publicId", publicLimiter, asyncRoute(async (req, res) =>
   res.json({ request: asPublicRequest(request), paypalSandboxConfigured: paypalIsConfigured() });
 }));
 
-app.get("/api/me/requests", accountLimiter, requireSignedInUser, asyncRoute(async (req, res) => {
+app.get("/api/me/requests", accountLimiter, requireSignedInUser, requireDatabase, asyncRoute(async (req, res) => {
   const requests = await PaymentRequest.find({ ownerUid: req.firebaseUser.uid })
     .sort({ createdAt: -1 })
     .limit(50)
@@ -275,7 +283,7 @@ app.get("/api/me/requests", accountLimiter, requireSignedInUser, asyncRoute(asyn
   res.json({ requests: requests.map(asOwnerRequest), authMode });
 }));
 
-app.post("/api/requests", accountLimiter, requireSignedInUser, asyncRoute(async (req, res) => {
+app.post("/api/requests", accountLimiter, requireSignedInUser, requireDatabase, asyncRoute(async (req, res) => {
   if (!paypalIsConfigured()) throw new HttpError(503, "PayPal Sandbox is not configured yet.");
   const parsed = requestSchema.safeParse(req.body);
   if (!parsed.success) {
@@ -292,7 +300,7 @@ app.post("/api/requests", accountLimiter, requireSignedInUser, asyncRoute(async 
   res.status(201).json({ request: asOwnerRequest(request), authMode });
 }));
 
-app.post("/api/checkout/orders", checkoutLimiter, asyncRoute(async (req, res) => {
+app.post("/api/checkout/orders", checkoutLimiter, requireDatabase, asyncRoute(async (req, res) => {
   const parsed = z.object({ paymentRequestId: publicIdSchema }).strict().safeParse(req.body);
   if (!parsed.success) throw new HttpError(400, "Provide a valid payment request.");
   if (!paypalIsConfigured()) throw new HttpError(503, "PayPal Sandbox is not configured yet.");
@@ -338,7 +346,7 @@ app.post("/api/checkout/orders", checkoutLimiter, asyncRoute(async (req, res) =>
   }
 }));
 
-app.post("/api/checkout/capture", checkoutLimiter, asyncRoute(async (req, res) => {
+app.post("/api/checkout/capture", checkoutLimiter, requireDatabase, asyncRoute(async (req, res) => {
   const parsed = orderCaptureSchema.safeParse(req.body);
   if (!parsed.success) throw new HttpError(400, "Provide a valid payment request and PayPal order.");
   if (!paypalIsConfigured()) throw new HttpError(503, "PayPal Sandbox is not configured yet.");
@@ -380,6 +388,9 @@ app.post("/api/checkout/capture", checkoutLimiter, asyncRoute(async (req, res) =
 
 const frontendDist = fileURLToPath(new URL("../dist/", import.meta.url));
 app.use(express.static(frontendDist));
+app.use("/api", (_req, _res, next) => {
+  next(new HttpError(404, "PayApp could not find that API endpoint. Restart the server and try again."));
+});
 app.use((req, res, next) => {
   if (req.method !== "GET" || req.path.startsWith("/api/")) return next();
   res.sendFile("index.html", { root: frontendDist }, (error) => {
@@ -392,12 +403,34 @@ app.use((error, _req, res, _next) => {
   if (status >= 500) console.error("PayApp request failed.", error);
   res.status(status).json({
     error: status >= 500 && !(error instanceof HttpError)
-      ? "Something went wrong. Please try again."
+      ? "PayApp could not complete the request. Check the server logs and try again."
       : error.message
   });
 });
 
-await mongoose.connect(process.env.MONGODB_URI);
 app.listen(port, () => {
-  console.log(`PayApp API listening on port ${port} (PayPal Sandbox only).`);
+  console.log(`PayApp listening on port ${port} (PayPal Sandbox only).`);
 });
+
+async function connectDatabase() {
+  let retryDelayMs = 2_000;
+  while (mongoose.connection.readyState !== 1) {
+    try {
+      await mongoose.connect(process.env.MONGODB_URI, { serverSelectionTimeoutMS: 5_000 });
+      console.log("PayApp MongoDB connection is ready.");
+      return;
+    } catch (error) {
+      console.error(`PayApp could not connect to MongoDB: ${error.message}`);
+      await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
+      retryDelayMs = Math.min(retryDelayMs * 2, 30_000);
+    }
+  }
+}
+
+if (process.env.MONGODB_URI) {
+  connectDatabase().catch((error) => {
+    console.error("Unexpected PayApp MongoDB connection failure.", error);
+  });
+} else {
+  console.warn("MONGODB_URI is not set. The landing page and local session work; database features are unavailable.");
+}

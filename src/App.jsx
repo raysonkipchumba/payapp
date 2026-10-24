@@ -3,7 +3,7 @@ import {
   createUserWithEmailAndPassword,
   signInWithEmailAndPassword
 } from "firebase/auth";
-import { Link, Route, Routes, useParams } from "react-router-dom";
+import { Link, Navigate, Route, Routes, useParams } from "react-router-dom";
 import { PayPalButtons, PayPalScriptProvider } from "@paypal/react-paypal-js";
 import { apiRequest } from "./api.js";
 import { auth, firebaseConfigured } from "./firebase.js";
@@ -28,10 +28,12 @@ function Header({ user, authMode }) {
     <nav className="navbar navbar-expand-lg app-navbar">
       <div className="container">
         <Link className="navbar-brand app-brand" to="/">pay<span>app</span></Link>
-        <div className="d-flex align-items-center gap-3">
+        <div className="d-flex align-items-center gap-3 ms-auto">
+          <Link className="header-home-link d-none d-sm-inline" to="/">Home</Link>
+          <Link className="btn btn-app-outline btn-sm" to="/dashboard">Dashboard</Link>
           {user?.isLocalDevelopment && <span className="sandbox-badge">LOCAL SESSION</span>}
           {user && <span className="signed-in-email d-none d-sm-inline">{user.email}</span>}
-          {user && <button className="btn btn-outline-secondary btn-sm" onClick={() => signOutSession(authMode)}>{authMode === "firebase" ? "Sign out" : "New local session"}</button>}
+          {user && <button className="btn btn-app-outline btn-sm" onClick={() => signOutSession(authMode)}>{authMode === "firebase" ? "Sign out" : "New local session"}</button>}
         </div>
       </div>
     </nav>
@@ -195,6 +197,81 @@ function PaymentList({ requests, onCopy }) {
   );
 }
 
+function LandingPage() {
+  return (
+    <main className="landing-page">
+      <section className="container landing-hero">
+        <div className="row align-items-center g-5">
+          <div className="col-lg-7">
+            <span className="landing-kicker"><span className="kicker-dot" /> A clearer way to collect</span>
+            <h1 className="landing-title">Good things happen<br className="d-none d-md-block" /> when money <span>moves simply.</span></h1>
+            <p className="landing-copy">Make a payment request, share one secure link, and see when the payment is confirmed. No confusing steps. No pretend balance.</p>
+            <div className="d-flex flex-wrap gap-3 mt-4">
+              <Link className="btn btn-app-primary btn-lg" to="/dashboard">Get started <span aria-hidden="true">↗</span></Link>
+              <a className="btn btn-app-outline btn-lg" href="#how-it-works">See how it works</a>
+            </div>
+            <p className="landing-footnote">Free to explore · PayPal Sandbox checkout · No real money charged</p>
+          </div>
+          <div className="col-lg-5">
+            <div className="landing-visual" aria-label="Illustration showing a shareable payment request">
+              <div className="visual-orbit orbit-one" />
+              <div className="visual-orbit orbit-two" />
+              <div className="visual-spark spark-one" aria-hidden="true">✳</div>
+              <div className="visual-spark spark-two" aria-hidden="true">✦</div>
+              <div className="visual-card">
+                <div className="d-flex align-items-center justify-content-between mb-4">
+                  <span className="visual-brand">pay<span>app</span></span>
+                  <span className="visual-label">PAYMENT LINK</span>
+                </div>
+                <p className="visual-caption">A better way to ask</p>
+                <h2 className="visual-heading">Clear request.<br />Easy checkout.</h2>
+                <div className="visual-divider" />
+                <div className="d-flex align-items-center gap-2">
+                  <span className="visual-link-icon" aria-hidden="true">↗</span>
+                  <span className="visual-share-text">One link to send and share</span>
+                </div>
+                <div className="visual-secure" aria-label="PayPal Sandbox checkout">PAYPAL SANDBOX CHECKOUT <span aria-hidden="true">✓</span></div>
+              </div>
+              <div className="visual-floating" aria-hidden="true"><span>✓</span> Payment confirmed</div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section className="container landing-how" id="how-it-works">
+        <div className="landing-section-heading">
+          <span className="landing-kicker">STRAIGHTFORWARD BY DESIGN</span>
+          <h2>From “could you pay me?” to done.</h2>
+        </div>
+        <div className="row g-3">
+          <div className="col-md-4">
+            <article className="how-card h-100">
+              <span className="how-number">01</span>
+              <h3>Make a request</h3>
+              <p>Say what it’s for and set the amount. Your request is saved to your account.</p>
+            </article>
+          </div>
+          <div className="col-md-4">
+            <article className="how-card h-100">
+              <span className="how-number">02</span>
+              <h3>Share one simple link</h3>
+              <p>Send the link to your payer. They’ll see the details before they choose to continue.</p>
+            </article>
+          </div>
+          <div className="col-md-4">
+            <article className="how-card h-100">
+              <span className="how-number">03</span>
+              <h3>Track the confirmation</h3>
+              <p>Your request changes to paid only when PayPal confirms the Sandbox checkout.</p>
+            </article>
+          </div>
+        </div>
+        <div className="landing-note mt-4"><span aria-hidden="true">✳</span><span><strong>Built for clarity.</strong> Payments are test transactions, not real money. PayApp shows actual saved requests—not a made-up wallet balance.</span></div>
+      </section>
+    </main>
+  );
+}
+
 function Dashboard({ user, paypalConfigured }) {
   const [requests, setRequests] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -235,6 +312,9 @@ function Dashboard({ user, paypalConfigured }) {
 
   return (
     <main className="container app-main">
+      <div className="dashboard-intro">
+        <Link to="/" className="back-home">← Back to home</Link>
+      </div>
       <div className="page-heading d-flex flex-wrap justify-content-between align-items-end gap-3">
         <div>
           <span className="eyebrow">YOUR PAYAPP</span>
@@ -421,15 +501,17 @@ export default function App() {
       <Header user={user} authMode={authMode} />
       <Routes>
         <Route path="/pay/:publicId" element={<PaymentPage paypalClientId={paypalConfig.clientId} paypalConfigured={paypalConfig.configured} />} />
-        <Route path="*" element={
+        <Route path="/dashboard" element={
           !authReady
             ? <main className="container app-main"><div className="card app-card p-5 text-center text-secondary">Connecting to PayApp…</div></main>
             : authError
-              ? <main className="container app-main"><div className="alert alert-danger" role="alert">{authError}</div></main>
+              ? <main className="container app-main"><div className="alert alert-warning" role="alert"><h1 className="h5">Your dashboard is temporarily unavailable.</h1><p>{authError}</p><p className="mb-3">You can still explore the landing page while the server starts. Payment requests need the PayApp API and MongoDB to be running.</p><Link className="btn btn-app-primary" to="/">Go to home</Link></div></main>
               : authMode === "firebase" && !user
                 ? <AuthPanel />
                 : <Dashboard user={user} paypalConfigured={paypalConfig.configured} />
         } />
+        <Route path="/" element={<LandingPage />} />
+        <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
       <footer className="container app-footer">PayApp · PayPal Sandbox integration · No real payments are processed.</footer>
     </>
